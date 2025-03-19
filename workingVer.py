@@ -13,7 +13,7 @@ from threading import Thread, Lock, Event
 from concurrent.futures import ThreadPoolExecutor
 import logging
 
-# Set up logging
+# Set up logging to keep track of what's happening
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger()
 
@@ -22,28 +22,28 @@ DEBUG = False  # Toggle for detailed debug output
 class TrackerConfig:
     def __init__(self):
         # Camera settings
-        self.CAMERA_WIDTH = 320
-        self.CAMERA_HEIGHT = 200
+        self.CAMERA_WIDTH = 320  # Smaller width for better performance
+        self.CAMERA_HEIGHT = 200  # Corresponding height for the resolution
 
-        # Sensitivity for pan/tilt adjustments
+        # Sensitivity for adjusting the pan/tilt
         self.PAN_SENSITIVITY = 15
         self.TILT_SENSITIVITY = 15
 
-        # Movement limits for pan/tilt
+        # Movement limits to prevent the camera from going out of range
         self.PAN_LIMIT = 70
         self.TILT_LIMIT = 90
 
-        # Minimum movement threshold
+        # How much movement is required before adjusting position
         self.MOVE_THRESHOLD = 0.5
 
-        # Sentry mode settings
+        # Settings for face loss and sentry mode
         self.MAX_FACE_LOSS_FRAMES = 30
-        self.SENTRY_TILT_OFFSET = -50  # Default tilt for scanning
-        self.SENTRY_SWEEP_STEP = 3     # Sweep step size
-        self.SENTRY_WAIT_TIME = 0.05   # Pause between sentry movements
+        self.SENTRY_TILT_OFFSET = -50  # Default tilt when scanning
+        self.SENTRY_SWEEP_STEP = 3     # Step size for sweeping motion
+        self.SENTRY_WAIT_TIME = 0.05   # Pause between each movement
 
-        # Email throttling (seconds between emails)
-        self.EMAIL_INTERVAL = 60
+        # Email throttling to prevent spam
+        self.EMAIL_INTERVAL = 60  # Minimum time (in seconds) between emails
 
 config = TrackerConfig()
 
@@ -68,11 +68,11 @@ email_executor = ThreadPoolExecutor(max_workers=2)
 def send_notification_email_with_image(frame):
     """
     Sends an email with an attached image.
-    Email credentials are now hard-coded in plain text.
+    Email credentials are hard-coded in plain text.
     """
-    SENDER_EMAIL = " "
-    SENDER_PASSWORD = " "  # Replace with your actual password or app-specific password
-    RECEIVER_EMAIL = " "
+    SENDER_EMAIL = "mck097@gmail.com"
+    SENDER_PASSWORD = "bbcq ewmh lpsc ahyv"  # Replace with your actual password or app-specific password
+    RECEIVER_EMAIL = "obradovic.m22@htlwienwest.at"
     
     subject = "Face Detection Notification"
     body = "A face was detected by your camera. See the attached image."
@@ -209,8 +209,10 @@ def track_face():
 
                 pan(pan_cx)
                 tilt(pan_cy)
+
             else:
                 face_loss_counter += 1
+                logger.info(f"No face detected. Counter: {face_loss_counter}, Sentry Active: {sentry_active_event.is_set()}")
                 if face_loss_counter > config.MAX_FACE_LOSS_FRAMES and not sentry_active_event.is_set():
                     sentry_active_event.set()
                     Thread(target=sentry_mode, daemon=True).start()
