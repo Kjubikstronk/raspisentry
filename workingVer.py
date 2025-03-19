@@ -75,9 +75,9 @@ def _send_email_task(frame):
     """
     The core logic for sending an email with the image attached.
     """
-    SENDER_EMAIL = "mck097@gmail.com"
-    SENDER_PASSWORD = "bbcq ewmh lpsc ahyv"  # Replace with your app-specific password if 2FA is enabled
-    RECEIVER_EMAIL = "obradovic.m22@htlwienwest.at"
+    SENDER_EMAIL = " "
+    SENDER_PASSWORD = " "  # Replace with your app-specific password if 2FA is enabled
+    RECEIVER_EMAIL = " "
 
     subject = "Face Detection Notification"
     body = "A face was detected by your camera. See the attached image."
