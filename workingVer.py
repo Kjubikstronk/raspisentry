@@ -2,6 +2,7 @@ import os
 import time
 import math
 import socket
+import requests
 import numpy as np
 import cv2
 import smtplib
@@ -43,54 +44,72 @@ class GPSLocator:
             self.session = self.gps.gps(mode=self.gps.WATCH_ENABLE)
             self.use_dummy = False
         except ImportError:
-            logger.warning("gps module not available; using dummy GPS location.")
+            logger.warning("gps module not available; falling back to IP-based geolocation.")
             self.use_dummy = True
 
     def get_location(self):
-        if self.use_dummy:
-            return "Lat: 0.0, Lon: 0.0"
+        if not self.use_dummy:
+            try:
+                report = self.session.next()
+                if report['class'] == 'TPV':
+                    lat = getattr(report, 'lat', None)
+                    lon = getattr(report, 'lon', None)
+                    if lat is not None and lon is not None:
+                        return f"Lat: {lat}, Lon: {lon}"
+            except Exception as e:
+                logger.error("GPS error: " + str(e))
+        # Fallback: use public IP-based geolocation with city info
         try:
-            report = self.session.next()
-            if report['class'] == 'TPV':
-                lat = getattr(report, 'lat', None)
-                lon = getattr(report, 'lon', None)
+            response = requests.get("http://ip-api.com/json/")
+            if response.status_code == 200:
+                data = response.json()
+                city = data.get("city")
+                region = data.get("regionName")
+                country = data.get("country")
+                if city and region and country:
+                    return f"{city}, {region}, {country}"
+                # Fallback to coordinates if city not available
+                lat = data.get("lat")
+                lon = data.get("lon")
                 if lat is not None and lon is not None:
                     return f"Lat: {lat}, Lon: {lon}"
         except Exception as e:
-            logger.error("GPS error: " + str(e))
+            logger.error("IP geolocation error: " + str(e))
         return "Location unavailable"
 
 # --- Email Notification (DRY, SOLID) ---
 class EmailNotifier:
     def __init__(self):
         self.sender_email = "&&&"
-        self.sender_password = "&&&"  # Replace with your actual or app-specific password
+        self.sender_password = "&&&"  # Replace with your actual/app-specific password
         self.receiver_email = "&&&"
         self.executor = ThreadPoolExecutor(max_workers=2)
         self.gps_locator = GPSLocator()
 
+    def _get_public_ip(self):
+        try:
+            return requests.get("https://api.ipify.org").text
+        except Exception as e:
+            logger.error("Error getting public IP: " + str(e))
+            return "Unavailable"
+
     def get_additional_info(self):
-        # Gather extra info as a dictionary (easy to later store in SQLite)
         timestamp = time.ctime()
         device_id = Config.DEVICE_ID
-        try:
-            local_ip = socket.gethostbyname(socket.gethostname())
-        except Exception:
-            local_ip = "Unavailable"
+        public_ip = self._get_public_ip()
         gps_info = self.gps_locator.get_location()
         return {
             "Timestamp": timestamp,
             "Device ID": device_id,
-            "Local IP": local_ip,
-            "GPS Location": gps_info
-        }
-
+            "Public IP": public_ip,
+            "Location": gps_info
+        }    
+   
     def send_notification(self, frame):
         self.executor.submit(self._send_email, frame)
 
     def _send_email(self, frame):
         info = self.get_additional_info()
-        # Create a simple list of key-value pairs for the email body.
         info_lines = [f"{key}: {value}" for key, value in info.items()]
         extra_info = "\n".join(info_lines)
         subject = "Face Detection Notification"
