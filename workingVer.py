@@ -1,6 +1,8 @@
 import os
 import time
 import math
+import socket
+import requests
 import numpy as np
 import cv2
 import smtplib
@@ -13,11 +15,11 @@ from threading import Thread, Lock, Event
 from concurrent.futures import ThreadPoolExecutor
 import logging
 
-# Basic logging setup
+# --- Basic Logging Setup ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger()
 
-# --- Configuration (KISS + YAGNI) ---
+# --- Configuration (KISS, YAGNI) ---
 class Config:
     CAMERA_WIDTH = 320
     CAMERA_HEIGHT = 200
@@ -31,38 +33,104 @@ class Config:
     SENTRY_SWEEP_STEP = 3
     SENTRY_WAIT_TIME = 0.05
     EMAIL_INTERVAL = 60
+    DEVICE_ID = "RaspiSentry-001"  # Simple device identifier
 
-# --- Email Notification (Single Responsibility, DRY) ---
+# --- GPS Location (SOLID: Single Responsibility) ---
+class GPSLocator:
+    def __init__(self):
+        try:
+            import gps  # Requires python-gps package and gpsd running
+            self.gps = gps
+            self.session = self.gps.gps(mode=self.gps.WATCH_ENABLE)
+            self.use_dummy = False
+        except ImportError:
+            logger.warning("gps module not available; falling back to IP-based geolocation.")
+            self.use_dummy = True
+
+    def get_location(self):
+        if not self.use_dummy:
+            try:
+                report = self.session.next()
+                if report['class'] == 'TPV':
+                    lat = getattr(report, 'lat', None)
+                    lon = getattr(report, 'lon', None)
+                    if lat is not None and lon is not None:
+                        return f"Lat: {lat}, Lon: {lon}"
+            except Exception as e:
+                logger.error("GPS error: " + str(e))
+        # Fallback: use public IP-based geolocation with city info
+        try:
+            response = requests.get("http://ip-api.com/json/")
+            if response.status_code == 200:
+                data = response.json()
+                city = data.get("city")
+                region = data.get("regionName")
+                country = data.get("country")
+                if city and region and country:
+                    return f"{city}, {region}, {country}"
+                # Fallback to coordinates if city not available
+                lat = data.get("lat")
+                lon = data.get("lon")
+                if lat is not None and lon is not None:
+                    return f"Lat: {lat}, Lon: {lon}"
+        except Exception as e:
+            logger.error("IP geolocation error: " + str(e))
+        return "Location unavailable"
+
+# --- Email Notification (DRY, SOLID) ---
 class EmailNotifier:
     def __init__(self):
-        self.sender_email = "$$$$"
-        self.sender_password = "$$$$$$$"  # Replace  actual/app-specific password
-        self.receiver_email = "$$$$$$$$"
+        self.sender_email = "&&&"
+        self.sender_password = "&&&"  # Replace with your actual/app-specific password
+        self.receiver_email = "&&&"
         self.executor = ThreadPoolExecutor(max_workers=2)
-    
+        self.gps_locator = GPSLocator()
+
+    def _get_public_ip(self):
+        try:
+            return requests.get("https://api.ipify.org").text
+        except Exception as e:
+            logger.error("Error getting public IP: " + str(e))
+            return "Unavailable"
+
+    def get_additional_info(self):
+        timestamp = time.ctime()
+        device_id = Config.DEVICE_ID
+        public_ip = self._get_public_ip()
+        gps_info = self.gps_locator.get_location()
+        return {
+            "Timestamp": timestamp,
+            "Device ID": device_id,
+            "Public IP": public_ip,
+            "Location": gps_info
+        }    
+   
     def send_notification(self, frame):
         self.executor.submit(self._send_email, frame)
-    
+
     def _send_email(self, frame):
+        info = self.get_additional_info()
+        info_lines = [f"{key}: {value}" for key, value in info.items()]
+        extra_info = "\n".join(info_lines)
         subject = "Face Detection Notification"
-        body = "A face was detected by your camera. See the attached image."
-        
+        body = f"A face was detected by your camera.\n\n{extra_info}\n\nSee the attached image."
+
         msg = MIMEMultipart()
         msg["Subject"] = subject
         msg["From"] = self.sender_email
         msg["To"] = self.receiver_email
         msg.attach(MIMEText(body, "plain"))
-        
-        # Compress the frame to JPEG
+
+        # Compress the frame to JPEG before attaching
         success, encoded_image = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 30])
         if not success:
             logger.error("Failed to encode image for email.")
             return
-        
+
         img = MIMEImage(encoded_image.tobytes(), _subtype="jpeg")
         img.add_header("Content-Disposition", "attachment", filename="detected_face.jpg")
         msg.attach(img)
-        
+
         try:
             server = smtplib.SMTP("smtp.gmail.com", 587)
             server.ehlo()
@@ -70,7 +138,7 @@ class EmailNotifier:
             server.login(self.sender_email, self.sender_password)
             server.send_message(msg)
             server.quit()
-            logger.info("Email with image sent successfully!")
+            logger.info("Email with image and additional info sent successfully!")
         except Exception as e:
             logger.error(f"Failed to send email: {e}")
 
@@ -85,7 +153,7 @@ class FaceDetector:
     
     def detect(self, frame, conf_threshold=0.5, min_box_area=1000):
         original_h, original_w = frame.shape[:2]
-        # Resize for faster processing
+        # Resize frame for faster processing
         small_frame = cv2.resize(frame, (160, 120))
         small_h, small_w = small_frame.shape[:2]
         blob = cv2.dnn.blobFromImage(small_frame, 1.0, (300, 300), (104.0, 177.0, 123.0))
@@ -148,7 +216,7 @@ class FaceTracker:
         self.consecutive_valid_faces = 0
         self.sentry_active_event = Event()
         self.motion_lock = Lock()
-        # Initial pan/tilt positions
+        # Initial motor positions
         self.pan_cx = 0
         self.pan_cy = self.config.SENTRY_TILT_OFFSET
 
