@@ -13,253 +13,224 @@ from threading import Thread, Lock, Event
 from concurrent.futures import ThreadPoolExecutor
 import logging
 
-# Set up logging to keep track of what's happening
+# Basic logging setup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger()
 
-DEBUG = False  # Toggle for detailed debug output
+# --- Configuration (KISS + YAGNI) ---
+class Config:
+    CAMERA_WIDTH = 320
+    CAMERA_HEIGHT = 200
+    PAN_SENSITIVITY = 15
+    TILT_SENSITIVITY = 15
+    PAN_LIMIT = 70
+    TILT_LIMIT = 90
+    MOVE_THRESHOLD = 0.5
+    MAX_FACE_LOSS_FRAMES = 30
+    SENTRY_TILT_OFFSET = -50
+    SENTRY_SWEEP_STEP = 3
+    SENTRY_WAIT_TIME = 0.05
+    EMAIL_INTERVAL = 60
 
-class TrackerConfig:
+# --- Email Notification (Single Responsibility, DRY) ---
+class EmailNotifier:
     def __init__(self):
-        # Camera settings
-        self.CAMERA_WIDTH = 320  # Smaller width for better performance
-        self.CAMERA_HEIGHT = 200  # Corresponding height for the resolution
-
-        # Sensitivity for adjusting the pan/tilt
-        self.PAN_SENSITIVITY = 15
-        self.TILT_SENSITIVITY = 15
-
-        # Movement limits to prevent the camera from going out of range
-        self.PAN_LIMIT = 70
-        self.TILT_LIMIT = 90
-
-        # How much movement is required before adjusting position
-        self.MOVE_THRESHOLD = 0.5
-
-        # Settings for face loss and sentry mode
-        self.MAX_FACE_LOSS_FRAMES = 30
-        self.SENTRY_TILT_OFFSET = -50  # Default tilt when scanning
-        self.SENTRY_SWEEP_STEP = 3     # Step size for sweeping motion
-        self.SENTRY_WAIT_TIME = 0.05   # Pause between each movement
-
-        # Email throttling to prevent spam
-        self.EMAIL_INTERVAL = 60  # Minimum time (in seconds) between emails
-
-config = TrackerConfig()
-
-# Paths to the DNN model files
-MODEL_FILE = "res10_300x300_ssd_iter_140000.caffemodel"
-CONFIG_FILE = "deploy.prototxt"
-
-if not (os.path.exists(MODEL_FILE) and os.path.exists(CONFIG_FILE)):
-    raise FileNotFoundError("DNN model files are missing. Check your paths!")
-
-# Load the pre-trained DNN model
-net = cv2.dnn.readNetFromCaffe(CONFIG_FILE, MODEL_FILE)
-
-# Shared resources and thread control
-sentry_active_event = Event()  # Controls whether sentry mode is active
-last_email_time = 0            # Timestamp for throttling emails
-lock = Lock()                  # Protect shared variables
-
-# Thread pool for asynchronous email sending
-email_executor = ThreadPoolExecutor(max_workers=2)
-
-def send_notification_email_with_image(frame):
-    """
-    Sends an email with an attached image.
-    Email credentials are hard-coded in plain text.
-    """
-    SENDER_EMAIL = "mck097@gmail.com"
-    SENDER_PASSWORD = "bbcq ewmh lpsc ahyv"  # Replace with your actual password or app-specific password
-    RECEIVER_EMAIL = "obradovic.m22@htlwienwest.at"
+        self.sender_email = "$$$$"
+        self.sender_password = "$$$$$$$"  # Replace  actual/app-specific password
+        self.receiver_email = "$$$$$$$$"
+        self.executor = ThreadPoolExecutor(max_workers=2)
     
-    subject = "Face Detection Notification"
-    body = "A face was detected by your camera. See the attached image."
+    def send_notification(self, frame):
+        self.executor.submit(self._send_email, frame)
+    
+    def _send_email(self, frame):
+        subject = "Face Detection Notification"
+        body = "A face was detected by your camera. See the attached image."
+        
+        msg = MIMEMultipart()
+        msg["Subject"] = subject
+        msg["From"] = self.sender_email
+        msg["To"] = self.receiver_email
+        msg.attach(MIMEText(body, "plain"))
+        
+        # Compress the frame to JPEG
+        success, encoded_image = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 30])
+        if not success:
+            logger.error("Failed to encode image for email.")
+            return
+        
+        img = MIMEImage(encoded_image.tobytes(), _subtype="jpeg")
+        img.add_header("Content-Disposition", "attachment", filename="detected_face.jpg")
+        msg.attach(img)
+        
+        try:
+            server = smtplib.SMTP("smtp.gmail.com", 587)
+            server.ehlo()
+            server.starttls()
+            server.login(self.sender_email, self.sender_password)
+            server.send_message(msg)
+            server.quit()
+            logger.info("Email with image sent successfully!")
+        except Exception as e:
+            logger.error(f"Failed to send email: {e}")
 
-    msg = MIMEMultipart()
-    msg["Subject"] = subject
-    msg["From"] = SENDER_EMAIL
-    msg["To"] = RECEIVER_EMAIL
-    msg.attach(MIMEText(body, "plain"))
+# --- Face Detection (Single Responsibility) ---
+class FaceDetector:
+    def __init__(self):
+        self.model_file = "res10_300x300_ssd_iter_140000.caffemodel"
+        self.config_file = "deploy.prototxt"
+        if not (os.path.exists(self.model_file) and os.path.exists(self.config_file)):
+            raise FileNotFoundError("DNN model files are missing. Check your paths!")
+        self.net = cv2.dnn.readNetFromCaffe(self.config_file, self.model_file)
+    
+    def detect(self, frame, conf_threshold=0.5, min_box_area=1000):
+        original_h, original_w = frame.shape[:2]
+        # Resize for faster processing
+        small_frame = cv2.resize(frame, (160, 120))
+        small_h, small_w = small_frame.shape[:2]
+        blob = cv2.dnn.blobFromImage(small_frame, 1.0, (300, 300), (104.0, 177.0, 123.0))
+        self.net.setInput(blob)
+        detections = self.net.forward()
+        boxes = []
+        for i in range(detections.shape[2]):
+            confidence = detections[0, 0, i, 2]
+            if confidence > conf_threshold:
+                box = detections[0, 0, i, 3:7] * np.array([small_w, small_h, small_w, small_h])
+                x1, y1, x2, y2 = box.astype("int")
+                if (x2 - x1) * (y2 - y1) > min_box_area:
+                    scale_x = original_w / small_w
+                    scale_y = original_h / small_h
+                    boxes.append((int(x1 * scale_x), int(y1 * scale_y),
+                                  int(x2 * scale_x), int(y2 * scale_y)))
+        return boxes
 
-    # Compress the frame to JPEG before sending
-    success, encoded_image = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 30])
-    if not success:
-        logger.error("Failed to encode image for email.")
-        return
-
-    img = MIMEImage(encoded_image.tobytes(), _subtype="jpeg")
-    img.add_header("Content-Disposition", "attachment", filename="detected_face.jpg")
-    msg.attach(img)
-
-    try:
-        server = smtplib.SMTP("smtp.gmail.com", 587)
-        server.ehlo()
-        server.starttls()
-        server.login(SENDER_EMAIL, SENDER_PASSWORD)
-        server.send_message(msg)
-        server.quit()
-        logger.info("Email with image sent successfully!")
-    except Exception as e:
-        logger.error(f"Failed to send email: {e}")
-
-def detect_faces_dnn(frame, conf_threshold=0.5, min_box_area=1000):
-    """
-    Runs the DNN model to detect faces in a frame.
-    Uses dynamic scaling based on the original and resized frame sizes.
-    """
-    original_h, original_w = frame.shape[:2]
-    # Resize frame for faster processing
-    small_frame = cv2.resize(frame, (160, 120))
-    small_h, small_w = small_frame.shape[:2]
-
-    blob = cv2.dnn.blobFromImage(small_frame, 1.0, (300, 300), (104.0, 177.0, 123.0))
-    net.setInput(blob)
-    detections = net.forward()
-    boxes = []
-
-    for i in range(detections.shape[2]):
-        confidence = detections[0, 0, i, 2]
-        if confidence > conf_threshold:
-            box = detections[0, 0, i, 3:7] * np.array([small_w, small_h, small_w, small_h])
-            x1, y1, x2, y2 = box.astype("int")
-            box_area = (x2 - x1) * (y2 - y1)
-            if box_area > min_box_area:
-                scale_x = original_w / small_w
-                scale_y = original_h / small_h
-                boxes.append((int(x1 * scale_x), int(y1 * scale_y),
-                              int(x2 * scale_x), int(y2 * scale_y)))
-    return boxes
-
-def sentry_mode():
-    """
-    Moves the camera in a sweeping pattern (sentry mode) when no faces are detected.
-    Uses an Event to control activation.
-    """
-    logger.info("Sentry mode activated.")
-    tilt_angle = config.SENTRY_TILT_OFFSET
-    pan_direction = 1  # Initial direction: right
-    pan_angle = -config.PAN_LIMIT  # Start at leftmost position
-
-    try:
-        while sentry_active_event.is_set():
-            pan_angle += pan_direction * config.SENTRY_SWEEP_STEP
-            if pan_angle > config.PAN_LIMIT or pan_angle < -config.PAN_LIMIT:
-                pan_direction *= -1
-                pan_angle += pan_direction * config.SENTRY_SWEEP_STEP
-
-            pan(pan_angle)
-            tilt(tilt_angle)
-            time.sleep(config.SENTRY_WAIT_TIME)
-    finally:
-        sentry_active_event.clear()
-        logger.info("Sentry mode finished.")
-
-def track_face():
-    """
-    Main loop for tracking faces in real time.
-    Switches to sentry mode after prolonged absence of faces.
-    """
-    global last_email_time
-
-    vs = PiVideoStream().start()
-    time.sleep(1)  # Allow the camera to initialize
-
-    pan_cx, pan_cy = 0, config.SENTRY_TILT_OFFSET
-    pan(pan_cx)
-    tilt(pan_cy)
-
-    face_loss_counter = 0
-    consecutive_valid_faces = 0
-    logger.info("Tracking started...")
-
-    try:
-        while True:
-            img_frame = vs.read()
-            if img_frame is None:
-                continue
-
-            faces = detect_faces_dnn(img_frame)
-
-            if len(faces) > 0:
-                consecutive_valid_faces += 1
-                face_loss_counter = 0
-
-                # Send email with image attachment if conditions are met
-                with lock:
-                    if consecutive_valid_faces > 3 and time.time() - last_email_time > config.EMAIL_INTERVAL:
-                        email_executor.submit(send_notification_email_with_image, img_frame.copy())
-                        last_email_time = time.time()
-
-                if sentry_active_event.is_set():
-                    sentry_active_event.clear()
-
-                # Choose the largest detected face
-                x, y, x2, y2 = max(faces, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
-                cx, cy = (x + x2) // 2, (y + y2) // 2
-
-                offset_x = ((config.CAMERA_WIDTH / 2) - cx) / config.PAN_SENSITIVITY
-                offset_y = -((config.CAMERA_HEIGHT / 2) - cy) / config.TILT_SENSITIVITY
-
-                if abs(offset_x) >= config.MOVE_THRESHOLD:
-                    pan_cx = max(min(pan_cx + offset_x, config.PAN_LIMIT), -config.PAN_LIMIT)
-                if abs(offset_y) >= config.MOVE_THRESHOLD:
-                    pan_cy = max(min(pan_cy + offset_y, config.TILT_LIMIT), -config.TILT_LIMIT)
-
-                pan(pan_cx)
-                tilt(pan_cy)
-
-            else:
-                face_loss_counter += 1
-                logger.info(f"No face detected. Counter: {face_loss_counter}, Sentry Active: {sentry_active_event.is_set()}")
-                if face_loss_counter > config.MAX_FACE_LOSS_FRAMES and not sentry_active_event.is_set():
-                    sentry_active_event.set()
-                    Thread(target=sentry_mode, daemon=True).start()
-
-            cv2.imshow("Face Tracking", img_frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-    finally:
-        vs.stop()
-        cv2.destroyAllWindows()
-
+# --- PiCamera Video Streaming (Single Responsibility) ---
 class PiVideoStream:
-    """
-    Handles video streaming from the PiCamera with thread-safe frame access.
-    """
-    def __init__(self, resolution=(config.CAMERA_WIDTH, config.CAMERA_HEIGHT)):
+    def __init__(self, resolution=(Config.CAMERA_WIDTH, Config.CAMERA_HEIGHT)):
         self.camera = Picamera2()
         self.camera_config = self.camera.create_video_configuration(
             main={"size": resolution, "format": "RGB888"},
-            controls={"FrameDurationLimits": (20000, 20000)},
+            controls={"FrameDurationLimits": (20000, 20000)}
         )
         self.camera.configure(self.camera_config)
         self.camera.start()
         self.frame = None
         self.stopped = False
         self.frame_lock = Lock()
-
+    
     def start(self):
         Thread(target=self.update, daemon=True).start()
         return self
-
+    
     def update(self):
         while not self.stopped:
             frame = self.camera.capture_array()
             with self.frame_lock:
                 self.frame = frame
-
+    
     def read(self):
         with self.frame_lock:
             return self.frame.copy() if self.frame is not None else None
-
+    
     def stop(self):
         self.stopped = True
         self.camera.stop()
 
-if __name__ == "__main__":
+# --- Face Tracking (High-Level Logic) ---
+class FaceTracker:
+    def __init__(self):
+        self.config = Config
+        self.video_stream = PiVideoStream()
+        self.detector = FaceDetector()
+        self.notifier = EmailNotifier()
+        self.last_email_time = 0
+        self.face_loss_counter = 0
+        self.consecutive_valid_faces = 0
+        self.sentry_active_event = Event()
+        self.motion_lock = Lock()
+        # Initial pan/tilt positions
+        self.pan_cx = 0
+        self.pan_cy = self.config.SENTRY_TILT_OFFSET
+
+    def _reset_motion(self):
+        self.pan_cx = 0
+        self.pan_cy = self.config.SENTRY_TILT_OFFSET
+        pan(self.pan_cx)
+        tilt(self.pan_cy)
+    
+    def sentry_mode(self):
+        logger.info("Sentry mode activated.")
+        tilt_angle = self.config.SENTRY_TILT_OFFSET
+        pan_direction = 1
+        pan_angle = -self.config.PAN_LIMIT
+        while self.sentry_active_event.is_set():
+            pan_angle += pan_direction * self.config.SENTRY_SWEEP_STEP
+            if pan_angle > self.config.PAN_LIMIT or pan_angle < -self.config.PAN_LIMIT:
+                pan_direction *= -1
+                pan_angle += pan_direction * self.config.SENTRY_SWEEP_STEP
+            pan(pan_angle)
+            tilt(tilt_angle)
+            time.sleep(self.config.SENTRY_WAIT_TIME)
+        logger.info("Sentry mode finished.")
+        self.sentry_active_event.clear()
+
+    def track(self):
+        self.video_stream.start()
+        time.sleep(1)
+        self._reset_motion()
+        logger.info("Tracking started...")
+        
+        while True:
+            img_frame = self.video_stream.read()
+            if img_frame is None:
+                continue
+            
+            boxes = self.detector.detect(img_frame)
+            if boxes:
+                self.consecutive_valid_faces += 1
+                self.face_loss_counter = 0
+
+                with self.motion_lock:
+                    if self.consecutive_valid_faces > 3 and time.time() - self.last_email_time > self.config.EMAIL_INTERVAL:
+                        self.notifier.send_notification(img_frame.copy())
+                        self.last_email_time = time.time()
+
+                if self.sentry_active_event.is_set():
+                    self.sentry_active_event.clear()
+
+                # Choose the largest detected face
+                x, y, x2, y2 = max(boxes, key=lambda b: (b[2]-b[0])*(b[3]-b[1]))
+                cx, cy = (x + x2) // 2, (y + y2) // 2
+                offset_x = ((self.config.CAMERA_WIDTH / 2) - cx) / self.config.PAN_SENSITIVITY
+                offset_y = -((self.config.CAMERA_HEIGHT / 2) - cy) / self.config.TILT_SENSITIVITY
+
+                if abs(offset_x) >= self.config.MOVE_THRESHOLD:
+                    self.pan_cx = max(min(self.pan_cx + offset_x, self.config.PAN_LIMIT), -self.config.PAN_LIMIT)
+                if abs(offset_y) >= self.config.MOVE_THRESHOLD:
+                    self.pan_cy = max(min(self.pan_cy + offset_y, self.config.TILT_LIMIT), -self.config.TILT_LIMIT)
+
+                pan(self.pan_cx)
+                tilt(self.pan_cy)
+            else:
+                self.face_loss_counter += 1
+                logger.info(f"No face detected. Count: {self.face_loss_counter}")
+                if self.face_loss_counter > self.config.MAX_FACE_LOSS_FRAMES and not self.sentry_active_event.is_set():
+                    self.sentry_active_event.set()
+                    Thread(target=self.sentry_mode, daemon=True).start()
+            
+            cv2.imshow("Face Tracking", img_frame)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+        
+        self.video_stream.stop()
+        cv2.destroyAllWindows()
+
+def main():
+    tracker = FaceTracker()
     try:
-        track_face()
+        tracker.track()
     except KeyboardInterrupt:
         logger.info("Exiting...")
+
+if __name__ == "__main__":
+    main()
