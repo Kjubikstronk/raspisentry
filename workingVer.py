@@ -81,9 +81,9 @@ class GPSLocator:
 # --- Email Notifier ---
 class EmailNotifier:
     def __init__(self):
-        self.sender_email    = "mck097@gmail.com"
-        self.sender_password = "bbcq ewmh lpsc ahyv"
-        self.receiver_email  = "obradovic.m22@htlwienwest.at"
+        self.sender_email    = "!!!"
+        self.sender_password = "!!!"
+        self.receiver_email  = "!!!"
         self.executor        = ThreadPoolExecutor(max_workers=2)
         self.gps_locator     = GPSLocator()
 
