@@ -1,11 +1,11 @@
 import os
 import time
-import math
-import socket
+import logging
 import requests
 import numpy as np
 import cv2
 import smtplib
+import sqlite3
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
@@ -13,292 +13,282 @@ from picamera2 import Picamera2
 from pantilthat import pan, tilt
 from threading import Thread, Lock, Event
 from concurrent.futures import ThreadPoolExecutor
-import logging
+from typing import Any, List, Tuple
 
 # --- Basic Logging Setup ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger()
+logger = logging.getLogger(__name__)
 
-# --- Configuration (KISS, YAGNI) ---
+# --- Configuration ---
 class Config:
-    CAMERA_WIDTH = 320
-    CAMERA_HEIGHT = 200
-    PAN_SENSITIVITY = 15
-    TILT_SENSITIVITY = 15
-    PAN_LIMIT = 70
-    TILT_LIMIT = 90
-    MOVE_THRESHOLD = 0.5
-    MAX_FACE_LOSS_FRAMES = 30
-    SENTRY_TILT_OFFSET = -50
-    SENTRY_SWEEP_STEP = 3
-    SENTRY_WAIT_TIME = 0.05
-    EMAIL_INTERVAL = 60
-    DEVICE_ID = "RaspiSentry-001"  # Simple device identifier
+    CAMERA_WIDTH        = 320
+    CAMERA_HEIGHT       = 200
+    PAN_SENSITIVITY     = 15
+    TILT_SENSITIVITY    = 15
+    PAN_LIMIT           = 70
+    TILT_LIMIT          = 90
+    MOVE_THRESHOLD      = 0.5
+    MAX_FACE_LOSS_FRAMES= 30
+    SENTRY_TILT_OFFSET  = -50
+    SENTRY_SWEEP_STEP   = 3
+    SENTRY_WAIT_TIME    = 0.05
+    EMAIL_INTERVAL      = 60
+    DEVICE_ID           = "RaspiSentry-001"
+    DB_PATH             = "face_logs.db"
 
-# --- GPS Location (SOLID: Single Responsibility) ---
-class GPSLocator:
-    def __init__(self):
-        try:
-            import gps  # Requires python-gps package and gpsd running
-            self.gps = gps
-            self.session = self.gps.gps(mode=self.gps.WATCH_ENABLE)
-            self.use_dummy = False
-        except ImportError:
-            logger.warning("gps module not available; falling back to IP-based geolocation.")
-            self.use_dummy = True
+# --- Geolocation ---
+def get_location() -> str:
+    try:
+        resp = requests.get("http://ip-api.com/json/", timeout=5)
+        data = resp.json()
+        city, region, country = data.get("city"), data.get("regionName"), data.get("country")
+        if city and region and country:
+            return f"{city}, {region}, {country}"
+        lat, lon = data.get("lat"), data.get("lon")
+        if lat is not None and lon is not None:
+            return f"Lat: {lat}, Lon: {lon}"
+    except Exception as e:
+        logger.error("Geolocation error: %s", e)
+    return "Location unavailable"
 
-    def get_location(self):
-        if not self.use_dummy:
-            try:
-                report = self.session.next()
-                if report['class'] == 'TPV':
-                    lat = getattr(report, 'lat', None)
-                    lon = getattr(report, 'lon', None)
-                    if lat is not None and lon is not None:
-                        return f"Lat: {lat}, Lon: {lon}"
-            except Exception as e:
-                logger.error("GPS error: " + str(e))
-        # Fallback: use public IP-based geolocation with city info
-        try:
-            response = requests.get("http://ip-api.com/json/")
-            if response.status_code == 200:
-                data = response.json()
-                city = data.get("city")
-                region = data.get("regionName")
-                country = data.get("country")
-                if city and region and country:
-                    return f"{city}, {region}, {country}"
-                # Fallback to coordinates if city not available
-                lat = data.get("lat")
-                lon = data.get("lon")
-                if lat is not None and lon is not None:
-                    return f"Lat: {lat}, Lon: {lon}"
-        except Exception as e:
-            logger.error("IP geolocation error: " + str(e))
-        return "Location unavailable"
+# --- Database Logger with BLOB support ---
+class FaceDatabase:
+    def __init__(self, path: str = Config.DB_PATH) -> None:
+        self.path = path
+        self._init_db()
 
-# --- Email Notification (DRY, SOLID) ---
+    def _init_db(self) -> None:
+        with sqlite3.connect(self.path) as conn:
+            c = conn.cursor()
+            # Create table with image BLOB column
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS detections (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT,
+                    confidence REAL,
+                    face_area INTEGER,
+                    location TEXT,
+                    ip TEXT,
+                    device_id TEXT,
+                    face_image BLOB
+                )
+            ''')
+            conn.commit()
+
+    def log_detection(self, confidence: float, area: int, location: str, ip: str, device_id: str, image_bytes: bytes) -> None:
+        ts = time.strftime('%Y-%m-%d %H:%M:%S')
+        with sqlite3.connect(self.path) as conn:
+            conn.execute(
+                'INSERT INTO detections (timestamp, confidence, face_area, location, ip, device_id, face_image) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                (ts, confidence, area, location, ip, device_id, image_bytes)
+            )
+            conn.commit()
+
+# --- Email Notification ---
 class EmailNotifier:
-    def __init__(self):
-        self.sender_email = "&&&"
-        self.sender_password = "&&&"  # Replace with your actual/app-specific password
-        self.receiver_email = "&&&"
-        self.executor = ThreadPoolExecutor(max_workers=2)
-        self.gps_locator = GPSLocator()
+    def __init__(self) -> None:
+        self.sender_email    = "&&&"
+        self.sender_password = "&&&"
+        self.receiver_email  = "&&&"
+        self.executor        = ThreadPoolExecutor(max_workers=2)
 
-    def _get_public_ip(self):
+    def _get_public_ip(self) -> str:
         try:
-            return requests.get("https://api.ipify.org").text
-        except Exception as e:
-            logger.error("Error getting public IP: " + str(e))
+            return requests.get("https://api.ipify.org", timeout=5).text
+        except Exception:
             return "Unavailable"
 
-    def get_additional_info(self):
-        timestamp = time.ctime()
-        device_id = Config.DEVICE_ID
+    def send(self, frame: Any, confidence: float, area: int, db: FaceDatabase) -> None:
+        self.executor.submit(self._send_email, frame, confidence, area, db)
+
+    def _send_email(self, frame: Any, confidence: float, area: int, db: FaceDatabase) -> None:
+        timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
         public_ip = self._get_public_ip()
-        gps_info = self.gps_locator.get_location()
-        return {
-            "Timestamp": timestamp,
-            "Device ID": device_id,
-            "Public IP": public_ip,
-            "Location": gps_info
-        }    
-   
-    def send_notification(self, frame):
-        self.executor.submit(self._send_email, frame)
+        location  = get_location()
 
-    def _send_email(self, frame):
-        info = self.get_additional_info()
-        info_lines = [f"{key}: {value}" for key, value in info.items()]
-        extra_info = "\n".join(info_lines)
-        subject = "Face Detection Notification"
-        body = f"A face was detected by your camera.\n\n{extra_info}\n\nSee the attached image."
+        # Encode ROI to JPEG bytes
+        ok, jpg = cv2.imencode('.jpg', frame)
+        image_bytes = jpg.tobytes() if ok else None
 
+        # Log to database including image blob
+        db.log_detection(confidence, area, location, public_ip, Config.DEVICE_ID, image_bytes)
+
+        # Build email body
+        body = (f"Timestamp: {timestamp}\n"
+                f"Device ID: {Config.DEVICE_ID}\n"
+                f"Public IP: {public_ip}\n"
+                f"Location: {location}\n"
+                f"Confidence: {confidence:.2f}\n"
+                f"Face Area: {area}\n")
         msg = MIMEMultipart()
-        msg["Subject"] = subject
-        msg["From"] = self.sender_email
-        msg["To"] = self.receiver_email
-        msg.attach(MIMEText(body, "plain"))
+        msg['Subject'] = 'Face Detection Alert'
+        msg['From']    = self.sender_email
+        msg['To']      = self.receiver_email
+        msg.attach(MIMEText(body, 'plain'))
 
-        # Compress the frame to JPEG before attaching
-        success, encoded_image = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 30])
-        if not success:
-            logger.error("Failed to encode image for email.")
-            return
-
-        img = MIMEImage(encoded_image.tobytes(), _subtype="jpeg")
-        img.add_header("Content-Disposition", "attachment", filename="detected_face.jpg")
-        msg.attach(img)
+        if image_bytes:
+            img = MIMEImage(image_bytes, _subtype='jpeg')
+            img.add_header('Content-Disposition', 'attachment', filename='face.jpg')
+            msg.attach(img)
 
         try:
-            server = smtplib.SMTP("smtp.gmail.com", 587)
-            server.ehlo()
-            server.starttls()
-            server.login(self.sender_email, self.sender_password)
-            server.send_message(msg)
-            server.quit()
-            logger.info("Email with image and additional info sent successfully!")
+            with smtplib.SMTP('smtp.gmail.com', 587, timeout=10) as s:
+                s.starttls()
+                s.login(self.sender_email, self.sender_password)
+                s.send_message(msg)
+                logger.info("Email sent successfully.")
         except Exception as e:
-            logger.error(f"Failed to send email: {e}")
-
-# --- Face Detection (Single Responsibility) ---
+            logger.error("Email error: %s", e)
+            
+# --- Face Detection ---
 class FaceDetector:
-    def __init__(self):
-        self.model_file = "res10_300x300_ssd_iter_140000.caffemodel"
-        self.config_file = "deploy.prototxt"
-        if not (os.path.exists(self.model_file) and os.path.exists(self.config_file)):
-            raise FileNotFoundError("DNN model files are missing. Check your paths!")
-        self.net = cv2.dnn.readNetFromCaffe(self.config_file, self.model_file)
-    
-    def detect(self, frame, conf_threshold=0.5, min_box_area=1000):
-        original_h, original_w = frame.shape[:2]
-        # Resize frame for faster processing
-        small_frame = cv2.resize(frame, (160, 120))
-        small_h, small_w = small_frame.shape[:2]
-        blob = cv2.dnn.blobFromImage(small_frame, 1.0, (300, 300), (104.0, 177.0, 123.0))
-        self.net.setInput(blob)
-        detections = self.net.forward()
-        boxes = []
-        for i in range(detections.shape[2]):
-            confidence = detections[0, 0, i, 2]
-            if confidence > conf_threshold:
-                box = detections[0, 0, i, 3:7] * np.array([small_w, small_h, small_w, small_h])
-                x1, y1, x2, y2 = box.astype("int")
-                if (x2 - x1) * (y2 - y1) > min_box_area:
-                    scale_x = original_w / small_w
-                    scale_y = original_h / small_h
-                    boxes.append((int(x1 * scale_x), int(y1 * scale_y),
-                                  int(x2 * scale_x), int(y2 * scale_y)))
-        return boxes
+    def __init__(self) -> None:
+        model = 'res10_300x300_ssd_iter_140000.caffemodel'
+        cfg   = 'deploy.prototxt'
+        if os.path.exists(model) and os.path.exists(cfg):
+            self.net = cv2.dnn.readNetFromCaffe(cfg, model)
+        else:
+            raise FileNotFoundError('Model files missing')
 
-# --- PiCamera Video Streaming (Single Responsibility) ---
+    def detect(self, frame: Any, threshold: float = 0.5) -> List[Tuple[int,int,int,int,float,int]]:
+        h, w = frame.shape[:2]
+        blob = cv2.dnn.blobFromImage(frame, 1.0, (300,300), (104,177,123))
+        self.net.setInput(blob)
+        dets = self.net.forward()
+        results = []
+        for i in range(dets.shape[2]):
+            conf = float(dets[0,0,i,2])
+            if conf > threshold:
+                x1,y1,x2,y2 = (dets[0,0,i,3:7] * np.array([w,h,w,h])).astype(int)
+                area = (x2-x1)*(y2-y1)
+                results.append((x1,y1,x2,y2,conf,area))
+        return results
+
+# --- Video Stream ---
 class PiVideoStream:
-    def __init__(self, resolution=(Config.CAMERA_WIDTH, Config.CAMERA_HEIGHT)):
+    def __init__(self, resolution: Tuple[int,int] = (Config.CAMERA_WIDTH, Config.CAMERA_HEIGHT)) -> None:
         self.camera = Picamera2()
-        self.camera_config = self.camera.create_video_configuration(
+        cfg = self.camera.create_video_configuration(
             main={"size": resolution, "format": "RGB888"},
             controls={"FrameDurationLimits": (20000, 20000)}
         )
-        self.camera.configure(self.camera_config)
+        self.camera.configure(cfg)
         self.camera.start()
         self.frame = None
         self.stopped = False
-        self.frame_lock = Lock()
-    
-    def start(self):
-        Thread(target=self.update, daemon=True).start()
+        self.lock = Lock()
+
+    def start(self) -> 'PiVideoStream':
+        Thread(target=self._update, daemon=True).start()
         return self
-    
-    def update(self):
+
+    def _update(self) -> None:
         while not self.stopped:
-            frame = self.camera.capture_array()
-            with self.frame_lock:
-                self.frame = frame
-    
-    def read(self):
-        with self.frame_lock:
-            return self.frame.copy() if self.frame is not None else None
-    
-    def stop(self):
+            img = self.camera.capture_array()
+            with self.lock:
+                self.frame = img
+
+    def read(self) -> Any:
+        with self.lock:
+            return None if self.frame is None else self.frame.copy()
+
+    def stop(self) -> None:
         self.stopped = True
         self.camera.stop()
 
-# --- Face Tracking (High-Level Logic) ---
+# --- Face Tracker ---
 class FaceTracker:
-    def __init__(self):
-        self.config = Config
-        self.video_stream = PiVideoStream()
-        self.detector = FaceDetector()
-        self.notifier = EmailNotifier()
-        self.last_email_time = 0
-        self.face_loss_counter = 0
-        self.consecutive_valid_faces = 0
-        self.sentry_active_event = Event()
-        self.motion_lock = Lock()
-        # Initial motor positions
-        self.pan_cx = 0
-        self.pan_cy = self.config.SENTRY_TILT_OFFSET
+    def __init__(self) -> None:
+        self.stream    = PiVideoStream()
+        self.detector  = FaceDetector()
+        self.db        = FaceDatabase()
+        self.emailer   = EmailNotifier()
+        self.last_email= 0.0
+        self.face_loss = 0
+        self.pan_cx    = 0
+        self.pan_cy    = Config.SENTRY_TILT_OFFSET
+        self.sentry_evt= Event()
+        self.motion_lock= Lock()
 
-    def _reset_motion(self):
+    def _reset_motion(self) -> None:
         self.pan_cx = 0
-        self.pan_cy = self.config.SENTRY_TILT_OFFSET
+        self.pan_cy = Config.SENTRY_TILT_OFFSET
         pan(self.pan_cx)
         tilt(self.pan_cy)
-    
-    def sentry_mode(self):
-        logger.info("Sentry mode activated.")
-        tilt_angle = self.config.SENTRY_TILT_OFFSET
-        pan_direction = 1
-        pan_angle = -self.config.PAN_LIMIT
-        while self.sentry_active_event.is_set():
-            pan_angle += pan_direction * self.config.SENTRY_SWEEP_STEP
-            if pan_angle > self.config.PAN_LIMIT or pan_angle < -self.config.PAN_LIMIT:
-                pan_direction *= -1
-                pan_angle += pan_direction * self.config.SENTRY_SWEEP_STEP
-            pan(pan_angle)
-            tilt(tilt_angle)
-            time.sleep(self.config.SENTRY_WAIT_TIME)
-        logger.info("Sentry mode finished.")
-        self.sentry_active_event.clear()
 
-    def track(self):
-        self.video_stream.start()
+    def _sentry_mode(self) -> None:
+        logger.info("Sentry mode activated.")
+        tilt(Config.SENTRY_TILT_OFFSET)
+        direction = 1
+        pan_angle = -Config.PAN_LIMIT
+        while self.sentry_evt.is_set():
+            pan_angle += direction * Config.SENTRY_SWEEP_STEP
+            if abs(pan_angle) > Config.PAN_LIMIT:
+                direction *= -1
+                pan_angle += direction * Config.SENTRY_SWEEP_STEP
+            pan(pan_angle)
+            time.sleep(Config.SENTRY_WAIT_TIME)
+        logger.info("Sentry mode finished.")
+        self.sentry_evt.clear()
+
+    def track(self) -> None:
+        self.stream.start()
         time.sleep(1)
+        cv2.namedWindow("Face Tracking", cv2.WINDOW_AUTOSIZE)
         self._reset_motion()
         logger.info("Tracking started...")
-        
+
         while True:
-            img_frame = self.video_stream.read()
-            if img_frame is None:
+            frame = self.stream.read()
+            if frame is None:
                 continue
-            
-            boxes = self.detector.detect(img_frame)
-            if boxes:
-                self.consecutive_valid_faces += 1
-                self.face_loss_counter = 0
+            dets = self.detector.detect(frame)
+            if dets:
+                x1,y1,x2,y2,conf,area = max(dets, key=lambda x: x[5])
+                self.face_loss = 0
 
+                # draw bounding box
+                cv2.rectangle(frame, (x1,y1), (x2,y2), (0,255,0), 2)
+
+                now = time.time()
+                if now - self.last_email > Config.EMAIL_INTERVAL:
+                    roi = frame[y1:y2, x1:x2]
+                    self.emailer.send(roi, conf, area, self.db)
+                    self.last_email = now
+
+                if self.sentry_evt.is_set():
+                    self.sentry_evt.clear()
+
+                cx,cy = (x1+x2)//2, (y1+y2)//2
+                dx = ((Config.CAMERA_WIDTH/2) - cx)/Config.PAN_SENSITIVITY
+                dy = -((Config.CAMERA_HEIGHT/2) - cy)/Config.TILT_SENSITIVITY
+                if abs(dx) >= Config.MOVE_THRESHOLD:
+                    self.pan_cx = max(min(self.pan_cx + dx, Config.PAN_LIMIT), -Config.PAN_LIMIT)
+                if abs(dy) >= Config.MOVE_THRESHOLD:
+                    self.pan_cy = max(min(self.pan_cy + dy, Config.TILT_LIMIT), -Config.TILT_LIMIT)
                 with self.motion_lock:
-                    if self.consecutive_valid_faces > 3 and time.time() - self.last_email_time > self.config.EMAIL_INTERVAL:
-                        self.notifier.send_notification(img_frame.copy())
-                        self.last_email_time = time.time()
-
-                if self.sentry_active_event.is_set():
-                    self.sentry_active_event.clear()
-
-                # Choose the largest detected face
-                x, y, x2, y2 = max(boxes, key=lambda b: (b[2]-b[0])*(b[3]-b[1]))
-                cx, cy = (x + x2) // 2, (y + y2) // 2
-                offset_x = ((self.config.CAMERA_WIDTH / 2) - cx) / self.config.PAN_SENSITIVITY
-                offset_y = -((self.config.CAMERA_HEIGHT / 2) - cy) / self.config.TILT_SENSITIVITY
-
-                if abs(offset_x) >= self.config.MOVE_THRESHOLD:
-                    self.pan_cx = max(min(self.pan_cx + offset_x, self.config.PAN_LIMIT), -self.config.PAN_LIMIT)
-                if abs(offset_y) >= self.config.MOVE_THRESHOLD:
-                    self.pan_cy = max(min(self.pan_cy + offset_y, self.config.TILT_LIMIT), -self.config.TILT_LIMIT)
-
-                pan(self.pan_cx)
-                tilt(self.pan_cy)
+                    pan(self.pan_cx)
+                    tilt(self.pan_cy)
             else:
-                self.face_loss_counter += 1
-                logger.info(f"No face detected. Count: {self.face_loss_counter}")
-                if self.face_loss_counter > self.config.MAX_FACE_LOSS_FRAMES and not self.sentry_active_event.is_set():
-                    self.sentry_active_event.set()
-                    Thread(target=self.sentry_mode, daemon=True).start()
-            
-            cv2.imshow("Face Tracking", img_frame)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
+                self.face_loss += 1
+                logger.info(f"No face detected. Count: {self.face_loss}")
+                if self.face_loss > Config.MAX_FACE_LOSS_FRAMES and not self.sentry_evt.is_set():
+                    self.sentry_evt.set()
+                    Thread(target=self._sentry_mode, daemon=True).start()
+
+            cv2.imshow("Face Tracking", frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
-        
-        self.video_stream.stop()
+
+        self.stream.stop()
         cv2.destroyAllWindows()
 
-def main():
-    tracker = FaceTracker()
+
+def main() -> None:
     try:
-        tracker.track()
+        FaceTracker().track()
     except KeyboardInterrupt:
         logger.info("Exiting...")
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
