@@ -14,8 +14,11 @@ from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from typing import Any, List, Tuple
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import json
+from flask import Flask, Response, jsonify
 
-# --- Logging ---
+# --- Logging Setup ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -35,6 +38,84 @@ class Config:
     EMAIL_INTERVAL      = 60
     DEVICE_ID           = "RaspiSentry-001"
     DB_PATH             = "face_logs.db"
+    COMMAND_PORT        = 5001  # Port for receiving commands
+
+# --- Command Server ---
+class CommandHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/video':
+            self.send_response(200)
+            self.send_header('Content-type', 'multipart/x-mixed-replace; boundary=frame')
+            self.end_headers()
+            try:
+                while True:
+                    frame = tracker.stream.read()
+                    if frame is not None:
+                        ret, buffer = cv2.imencode('.jpg', frame)
+                        if ret:
+                            self.wfile.write(b'--frame\r\n')
+                            self.wfile.write(b'Content-Type: image/jpeg\r\n\r\n')
+                            self.wfile.write(buffer.tobytes())
+                            self.wfile.write(b'\r\n')
+                    time.sleep(0.1)
+            except Exception as e:
+                logger.error(f"Video stream error: {e}")
+        else:
+            self.send_error(404)
+
+    def do_POST(self):
+        content_length = int(self.headers['Content-Length'])
+        post_data = self.rfile.read(content_length)
+        try:
+            data = json.loads(post_data.decode('utf-8'))
+            command = data.get('command')
+            value = data.get('value')
+            
+            if command == 'pan':
+                tracker.manual_control = True
+                tracker.sentry_evt.clear()
+                pan(int(value))
+            elif command == 'tilt':
+                tracker.manual_control = True
+                tracker.sentry_evt.clear()
+                tilt(int(value))
+            elif command == 'sentry_mode':
+                logger.info(f"Received sentry_mode command: {value}")
+                if value:
+                    tracker.manual_control = False
+                    if not tracker.sentry_evt.is_set():
+                        tracker.sentry_evt.set()
+                        if not tracker.sentry_thread or not tracker.sentry_thread.is_alive():
+                            tracker.sentry_thread = Thread(target=tracker._sentry_mode, daemon=True)
+                            tracker.sentry_thread.start()
+                else:
+                    tracker.manual_control = False
+                    tracker.sentry_evt.clear()
+                    logger.info("Sentry mode deactivated (event cleared)")
+                    if tracker.sentry_thread and tracker.sentry_thread.is_alive():
+                        tracker.sentry_thread.join(timeout=1)
+                        logger.info("Sentry thread joined after standby")
+            elif command == 'reset':
+                tracker.manual_control = False
+                tracker.sentry_evt.clear()
+                pan(0)
+                tilt(Config.SENTRY_TILT_OFFSET)
+            
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'status': 'success'}).encode())
+        except Exception as e:
+            logger.error(f"Command error: {e}")
+            self.send_response(500)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'status': 'error', 'message': str(e)}).encode())
+
+def start_command_server():
+    server = HTTPServer(('0.0.0.0', Config.COMMAND_PORT), CommandHandler)
+    Thread(target=server.serve_forever, daemon=True).start()
+    logger.info(f"Command server started on port {Config.COMMAND_PORT}")
 
 # --- Geolocation ---
 def get_location() -> str:
@@ -201,9 +282,11 @@ class FaceTracker:
         self.face_loss = 0
         self.consec    = 0
         self.sentry_evt= Event()
+        self.manual_control = False
         self.pan_x     = 0
         self.pan_y     = Config.SENTRY_TILT_OFFSET
         self.lock      = Lock()
+        self.sentry_thread = None
 
     def _reset_motion(self) -> None:
         self.pan_x = 0
@@ -216,7 +299,7 @@ class FaceTracker:
         tilt(Config.SENTRY_TILT_OFFSET)
         direction = 1
         pan_angle = -Config.PAN_LIMIT
-        while self.sentry_evt.is_set():
+        while self.sentry_evt.is_set() and not self.manual_control:
             pan_angle += direction * Config.SENTRY_SWEEP_STEP
             if abs(pan_angle) > Config.PAN_LIMIT:
                 direction *= -1
@@ -238,33 +321,35 @@ class FaceTracker:
             if frame is None:
                 continue
 
-            dets = self.detector.detect(frame)
-            if dets:
-                self.consec += 1
-                self.face_loss = 0
-                x1,y1,x2,y2,conf,area = max(dets, key=lambda b: b[5])
-                if self.consec > 3 and time.time() - self.last_time > Config.EMAIL_INTERVAL:
-                    roi = frame[y1:y2, x1:x2]
-                    self.emailer.send(roi, conf, area, self.db)
-                    self.last_time = time.time()
-                if self.sentry_evt.is_set():
-                    self.sentry_evt.clear()
-                cx,cy = (x1+x2)//2, (y1+y2)//2
-                dx = ((Config.CAMERA_WIDTH/2)-cx)/Config.PAN_SENSITIVITY
-                dy = -((Config.CAMERA_HEIGHT/2)-cy)/Config.TILT_SENSITIVITY
-                if abs(dx) >= Config.MOVE_THRESHOLD:
-                    self.pan_x = max(min(self.pan_x + dx, Config.PAN_LIMIT), -Config.PAN_LIMIT)                
-                if abs(dy) >= Config.MOVE_THRESHOLD:
-                    self.pan_y = max(min(self.pan_y + dy, Config.TILT_LIMIT), -Config.TILT_LIMIT)
-                with self.lock:
-                    pan(self.pan_x)
-                    tilt(self.pan_y)
-            else:
-                self.face_loss += 1
-                logger.info(f"No face detected. Count: {self.face_loss}")
-                if self.face_loss > Config.MAX_FACE_LOSS_FRAMES and not self.sentry_evt.is_set():
-                    self.sentry_evt.set()
-                    Thread(target=self._sentry_mode, daemon=True).start()
+            # Only process face detection if not in manual control
+            if not self.manual_control:
+                dets = self.detector.detect(frame)
+                if dets:
+                    self.consec += 1
+                    self.face_loss = 0
+                    x1,y1,x2,y2,conf,area = max(dets, key=lambda b: b[5])
+                    if self.consec > 3 and time.time() - self.last_time > Config.EMAIL_INTERVAL:
+                        roi = frame[y1:y2, x1:x2]
+                        self.emailer.send(roi, conf, area, self.db)
+                        self.last_time = time.time()
+                    if self.sentry_evt.is_set():
+                        self.sentry_evt.clear()
+                    cx,cy = (x1+x2)//2, (y1+y2)//2
+                    dx = ((Config.CAMERA_WIDTH/2)-cx)/Config.PAN_SENSITIVITY
+                    dy = -((Config.CAMERA_HEIGHT/2)-cy)/Config.TILT_SENSITIVITY
+                    if abs(dx) >= Config.MOVE_THRESHOLD:
+                        self.pan_x = max(min(self.pan_x + dx, Config.PAN_LIMIT), -Config.PAN_LIMIT)                
+                    if abs(dy) >= Config.MOVE_THRESHOLD:
+                        self.pan_y = max(min(self.pan_y + dy, Config.TILT_LIMIT), -Config.TILT_LIMIT)
+                    with self.lock:
+                        pan(self.pan_x)
+                        tilt(self.pan_y)
+                else:
+                    self.face_loss += 1
+                    logger.info(f"No face detected. Count: {self.face_loss}")
+                    if self.face_loss > Config.MAX_FACE_LOSS_FRAMES and not self.sentry_evt.is_set() and not self.manual_control:
+                        self.sentry_evt.set()
+                        Thread(target=self._sentry_mode, daemon=True).start()
 
             cv2.imshow("Face Tracking", frame)
             if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -273,5 +358,61 @@ class FaceTracker:
         self.stream.stop()
         cv2.destroyAllWindows()
 
+app = Flask(__name__)
+
+@app.route('/snapshot')
+def snapshot():
+    cap = cv2.VideoCapture(0)
+    ret, frame = cap.read()
+    cap.release()
+    if not ret:
+        return "Failed to capture image", 500
+    # Optionally resize for faster transfer
+    # frame = cv2.resize(frame, (320, 240))
+    _, jpeg = cv2.imencode('.jpg', frame)
+    return Response(jpeg.tobytes(), mimetype='image/jpeg')
+
+@app.route('/detections')
+def get_detections():
+    try:
+        with sqlite3.connect(Config.DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute('''
+                SELECT id, timestamp, confidence, face_area, location, ip, device_id
+                FROM detections
+                WHERE face_image IS NOT NULL
+                ORDER BY timestamp DESC
+                LIMIT 50
+            ''')
+            rows = cur.fetchall()
+            return jsonify([dict(row) for row in rows])
+    except Exception as e:
+        logger.error(f"Error fetching detections: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/detection_image/<int:det_id>')
+def get_detection_image(det_id):
+    try:
+        with sqlite3.connect(Config.DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute('SELECT face_image FROM detections WHERE id = ?', (det_id,))
+            result = cur.fetchone()
+            if result and result[0]:
+                return Response(result[0], mimetype='image/jpeg')
+            return "Image not found", 404
+    except Exception as e:
+        logger.error(f"Error fetching detection image: {e}")
+        return str(e), 500
+
 if __name__ == "__main__":
-    FaceTracker().track()
+    try:
+        # Start the command server before initializing the tracker
+        start_command_server()
+        # Initialize and start the tracker
+        tracker = FaceTracker()
+        tracker.track()
+    except KeyboardInterrupt:
+        logger.info("Program terminated by user")
+    except Exception as e:
+        logger.error(f"Program terminated due to error: {e}") 
