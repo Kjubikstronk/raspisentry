@@ -1,0 +1,85 @@
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
+.table img {
+    max-width: 150px;
+    height: auto;
+}
+
+.table td {
+    vertical-align: middle;
+}
+
+h1 {
+    color: #333;
+    margin-bottom: 1.5rem;
+}
+
+/* Logo bounce animation */
+.logo {
+    transition: transform 0.3s ease;
+}
+
+.logo:hover {
+    animation: bounce 0.5s ease;
+}
+
+@keyframes bounce {
+    0%, 100% {
+        transform: translateY(0);
+    }
+    50% {
+        transform: translateY(-10px);
+    }
+}
+
+/* Enhanced card styles */
+.card {
+    border-radius: 1rem;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.07), 0 1.5px 4px rgba(0,0,0,0.03);
+    transition: box-shadow 0.2s, transform 0.2s;
+}
+.card:hover {
+    box-shadow: 0 6px 24px rgba(0,0,0,0.12), 0 3px 8px rgba(0,0,0,0.06);
+    transform: translateY(-2px) scale(1.01);
+}
+
+/* Status badges */
+.badge-known {
+    background: #e7f5ff;
+    color: #0d6efd;
+    font-weight: 600;
+    border-radius: 0.5rem;
+    padding: 0.35em 0.8em;
+    font-size: 1em;
+}
+.badge-unknown {
+    background: #f8f9fa;
+    color: #6c757d;
+    font-weight: 600;
+    border-radius: 0.5rem;
+    padding: 0.35em 0.8em;
+    font-size: 1em;
+}
+
+/* Chevron animation */
+.chevron {
+    transition: transform 0.3s;
+}
+.card-body[aria-expanded="true"] .chevron {
+    transform: rotate(180deg);
+}
+
+/* Expanded details area */
+.card .collapse .card-body {
+    background: #f6faff;
+    border-radius: 0 0 1rem 1rem;
+    transition: background 0.3s;
+}
+
+body {
+    background-color: #f8f9fa;
+    background-image: url("data:image/svg+xml;utf8,<svg width='20' height='20' viewBox='0 0 20 20' fill='none' xmlns='http://www.w3.org/2000/svg'><circle cx='2' cy='2' r='2' fill='%23e0e7ff' fill-opacity='0.4'/></svg>");
+} 
