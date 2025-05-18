@@ -2,4 +2,7 @@ flask==3.0.2
 flask-login==0.6.3
 opencv-python==4.9.0.80
 numpy==1.26.4
-psutil==5.9.8 
+psutil==5.9.8
+pantilthat==0.0.7
+picamera2==0.3.12
+requests==2.31.0 
