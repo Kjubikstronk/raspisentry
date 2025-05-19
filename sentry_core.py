@@ -17,6 +17,7 @@ from typing import Any, List, Tuple
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import json
 from flask import Flask, Response, jsonify
+from email_notify import EmailNotifier
 
 # --- Logging Setup ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -161,61 +162,6 @@ class FaceDatabase:
                 (ts, confidence, area, location, ip, device_id, image_bytes)
             )
             conn.commit()
-
-# --- Email Notification ---
-class EmailNotifier:
-    def __init__(self) -> None:
-        self.sender_email    = "&&&"
-        self.sender_password = "&&&"
-        self.receiver_email  = "&&&"
-        self.executor        = ThreadPoolExecutor(max_workers=2)
-
-    def _get_public_ip(self) -> str:
-        try:
-            return requests.get("https://api.ipify.org", timeout=5).text
-        except:
-            return "Unavailable"
-
-    def send(self, frame: Any, confidence: float, area: int, db: FaceDatabase) -> None:
-        self.executor.submit(self._send_email, frame, confidence, area, db)
-
-    def _send_email(self, frame: Any, confidence: float, area: int, db: FaceDatabase) -> None:
-        timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
-        public_ip = self._get_public_ip()
-        location  = get_location()
-
-        ok, jpg = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 30])
-        image_bytes = jpg.tobytes() if ok else None
-
-        db.log_detection(confidence, area, location, public_ip, Config.DEVICE_ID, image_bytes)
-
-        body = (
-            f"Timestamp: {timestamp}\n"
-            f"Device ID: {Config.DEVICE_ID}\n"
-            f"Public IP: {public_ip}\n"
-            f"Location: {location}\n"
-            f"Confidence: {confidence:.2f}\n"
-            f"Face Area: {area}\n"
-        )
-        msg = MIMEMultipart()
-        msg['Subject'] = 'Face Detection Alert'
-        msg['From']    = self.sender_email
-        msg['To']      = self.receiver_email
-        msg.attach(MIMEText(body, 'plain'))
-
-        if image_bytes:
-            img = MIMEImage(image_bytes, _subtype='jpeg')
-            img.add_header('Content-Disposition', 'attachment', filename='face.jpg')
-            msg.attach(img)
-
-        try:
-            with smtplib.SMTP('smtp.gmail.com', 587, timeout=10) as s:
-                s.starttls()
-                s.login(self.sender_email, self.sender_password)
-                s.send_message(msg)
-                logger.info("Email sent successfully.")
-        except Exception as e:
-            logger.error("Email error: %s", e)
 
 # --- Face Detection ---
 class FaceDetector:

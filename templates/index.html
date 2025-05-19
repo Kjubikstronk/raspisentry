@@ -145,6 +145,51 @@
     .logo-container:hover .logo-text {
       opacity: 1;
     }
+    .recent-heading {
+      font-family: 'Orbitron', Arial, sans-serif;
+      font-size: 3rem;
+      font-weight: 900;
+      color: #222;
+      text-shadow: 0 2px 12px #b8000033, 0 4px 24px #007bff33;
+      margin-bottom: 0.2rem;
+      letter-spacing: 1px;
+      display: inline-block;
+    }
+    .heading-accent-wrap {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+    }
+    .accent-bar {
+      position: relative;
+      width: 60%;
+      height: 10px;
+      border-radius: 6px;
+      background: linear-gradient(90deg, #4dc3ff 0%, #fff 20%, #ff4d4d 50%, #fff 80%, #4dc3ff 100%);
+      background-size: 200% 100%;
+      margin-top: 0.2rem;
+      margin-bottom: 0.2rem;
+      opacity: 0.95;
+      animation: accent-move 7s linear infinite;
+      overflow: visible;
+    }
+    .accent-bar::before {
+      content: '';
+      position: absolute;
+      left: 0; top: 0; right: 0; bottom: 0;
+      border-radius: 8px;
+      background: linear-gradient(90deg, #4dc3ff 0%, #fff 20%, #ff4d4d 50%, #fff 80%, #4dc3ff 100%);
+      background-size: 200% 100%;
+      filter: blur(10px);
+      opacity: 0.7;
+      pointer-events: none;
+      animation: accent-move 7s linear infinite;
+      z-index: 1;
+    }
+    @keyframes accent-move {
+      0% { background-position: 0% 0; }
+      100% { background-position: 200% 0; }
+    }
   </style>
 </head>
 <body>
@@ -188,20 +233,37 @@
         </div>
       </div>
     </div>
-    <div class="d-flex justify-content-between align-items-center mb-4">
-      <h1>Recent Face Detections</h1>
-      <div class="d-flex align-items-center">
-        <span id="datetime" class="me-4 text-secondary" style="font-size:1.1rem;"></span>
-        <span class="me-3">Welcome, {{ current_user.id }}</span>
-        <a href="{{ url_for('logout') }}" class="btn btn-outline-danger">Logout</a>
+    <div class="mb-4">
+      <div class="heading-accent-wrap align-items-start" style="margin-bottom:0.5rem;">
+        <h1 class="recent-heading" style="font-size:2.2rem; text-align:left; margin-bottom:0.2rem;">Recent Face Detections</h1>
+        <div class="accent-bar" style="height:4px; width:180px; margin-bottom:0.3rem;"></div>
+        <div class="recent-desc text-muted" style="font-size:1.1rem; margin-bottom:0.2rem;">Monitor and manage recent face detections from your sentry system.</div>
+      </div>
+      <div id="status-bar" class="d-flex flex-wrap align-items-center gap-2 mb-3" style="gap:0.7rem;">
+        <span id="notif-status" class="badge rounded-pill bg-light text-dark d-flex align-items-center" style="font-size:1rem; padding:0.5em 1em;"><i class="bi bi-envelope me-2"></i><span>Email Notification: ...</span></span>
+        <span id="sentry-status" class="badge rounded-pill bg-light text-dark d-flex align-items-center" style="font-size:1rem; padding:0.5em 1em;"><i class="bi bi-shield-lock me-2"></i><span>Sentry Mode: ...</span></span>
+      </div>
+      <div class="d-flex flex-wrap align-items-center gap-2 mb-3" style="gap:0.7rem;">
+        <div class="d-flex align-items-center gap-2" style="gap: 0.5rem;">
+          <label for="sort-select" class="fw-bold mb-0" style="white-space:nowrap;">Sort by:</label>
+          <select id="sort-select" class="form-select w-auto">
+            <option value="date" selected>Date</option>
+            <option value="location">Location</option>
+            <option value="device_id">Device ID</option>
+            <option value="confidence">Confidence</option>
+          </select>
+        </div>
+        <div class="form-check form-switch ms-2">
+          <input class="form-check-input" type="checkbox" id="notif-toggle">
+          <label class="form-check-label fw-bold" for="notif-toggle">Email Notifications</label>
+        </div>
+        <a href="#" class="btn btn-outline-secondary ms-1" data-bs-toggle="modal" data-bs-target="#notifSettingsModal"><i class="bi bi-gear"></i> Notification Settings</a>
+        <a href="{{ url_for('liveview') }}" class="btn liveview-btn ms-1"><i class="bi bi-camera-video"></i> Live View</a>
       </div>
     </div>
-    <div class="d-flex justify-content-end mb-3">
-      <a href="{{ url_for('liveview') }}" class="btn liveview-btn">Live View</a>
-    </div>
-    <div class="row g-3">
+    <div class="row g-3" id="detections-list">
       {% for row in detections %}
-      <div class="col-12">
+      <div class="col-12 detection-card" data-timestamp="{{ row.timestamp }}" data-location="{{ row.location }}" data-device_id="{{ row.device_id }}" data-confidence="{{ row.confidence }}">
         <div class="card shadow-sm">
           <div class="card-body d-flex align-items-center" data-bs-toggle="collapse" data-bs-target="#details-{{ row.id }}" aria-expanded="false" style="cursor:pointer;">
             <a href="{{ url_for('image', det_id=row.id) }}" target="_blank" onclick="event.stopPropagation();">
@@ -233,13 +295,50 @@
       {% endfor %}
     </div>
   </div>
+  <!-- Notification Settings Modal -->
+  <div class="modal fade" id="notifSettingsModal" tabindex="-1" aria-labelledby="notifSettingsModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="notifSettingsModalLabel">Notification Email Settings</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <form id="notif-settings-form">
+            <div class="mb-3">
+              <label for="notif-sender" class="form-label">Sender Email</label>
+              <input type="email" class="form-control" id="notif-sender" required>
+            </div>
+            <div class="mb-3">
+              <label for="notif-receiver" class="form-label">Receiver Email</label>
+              <input type="email" class="form-control" id="notif-receiver" required>
+            </div>
+            <div class="mb-3">
+              <label for="notif-password" class="form-label">Password / API Key</label>
+              <input type="password" class="form-control" id="notif-password" autocomplete="new-password" placeholder="Leave blank to keep current">
+            </div>
+            <div class="mb-3">
+              <label for="notif-apikey" class="form-label">API Key (optional)</label>
+              <input type="password" class="form-control" id="notif-apikey" autocomplete="new-password" placeholder="Leave blank to keep current">
+            </div>
+            <button type="submit" class="btn btn-primary">Save</button>
+          </form>
+          <div id="notif-settings-success" class="alert alert-success mt-3 d-none" role="alert">Settings saved!</div>
+          <div id="notif-settings-error" class="alert alert-danger mt-3 d-none" role="alert">Error saving settings.</div>
+        </div>
+      </div>
+    </div>
+  </div>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
   <script src="{{ url_for('static', filename='js/script.js') }}"></script>
   <script>
     function updateDateTime() {
       const now = new Date();
       const formatted = now.toLocaleString();
-      document.getElementById('datetime').textContent = formatted;
+      const dtElem = document.getElementById('datetime');
+      if (dtElem) {
+        dtElem.textContent = formatted;
+      }
     }
     setInterval(updateDateTime, 1000);
     updateDateTime();
@@ -259,6 +358,137 @@
     }
     setInterval(fetchSystemStatus, 10000);
     fetchSystemStatus();
+
+    document.addEventListener('DOMContentLoaded', function() {
+      // Sorting detections on the frontend
+      const sortSelect = document.getElementById('sort-select');
+      if (sortSelect) {
+        sortSelect.addEventListener('change', function() {
+          const sortBy = this.value;
+          const list = document.getElementById('detections-list');
+          const cards = Array.from(list.getElementsByClassName('detection-card'));
+          cards.sort((a, b) => {
+            if (sortBy === 'date') {
+              // Newest first
+              return new Date(b.dataset.timestamp) - new Date(a.dataset.timestamp);
+            } else if (sortBy === 'confidence') {
+              return parseFloat(b.dataset.confidence) - parseFloat(a.dataset.confidence);
+            } else if (sortBy === 'location') {
+              return a.dataset.location.localeCompare(b.dataset.location);
+            } else if (sortBy === 'device_id') {
+              return a.dataset.device_id.localeCompare(b.dataset.device_id);
+            }
+            return 0;
+          });
+          // Clear and re-append sorted cards
+          list.innerHTML = '';
+          cards.forEach(card => list.appendChild(card));
+        });
+      }
+    });
+
+    // Notification toggle fetch and update
+    async function updateNotifToggle() {
+      const res = await fetch('/api/notifications/enabled');
+      if (!res.ok) return;
+      const data = await res.json();
+      document.getElementById('notif-toggle').checked = !!data.enabled;
+    }
+    document.getElementById('notif-toggle').addEventListener('change', async function() {
+      const enabled = this.checked;
+      await fetch('/api/notifications/enabled', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled })
+      });
+    });
+    updateNotifToggle();
+
+    // Update status bar badge styles for modern look
+    function updateStatusBarStyles() {
+      const notifStatus = document.getElementById('notif-status');
+      const notifText = notifStatus.querySelector('span');
+      if (notifText.textContent.includes('ON')) {
+        notifStatus.className = 'badge rounded-pill bg-success d-flex align-items-center';
+        notifStatus.querySelector('i').className = 'bi bi-envelope-fill me-2';
+      } else {
+        notifStatus.className = 'badge rounded-pill bg-danger d-flex align-items-center';
+        notifStatus.querySelector('i').className = 'bi bi-envelope-slash me-2';
+      }
+      const sentryStatus = document.getElementById('sentry-status');
+      const sentryText = sentryStatus.querySelector('span');
+      if (sentryText.textContent.trim().endsWith('INACTIVE')) {
+        sentryStatus.className = 'badge rounded-pill bg-danger d-flex align-items-center';
+        sentryStatus.querySelector('i').className = 'bi bi-shield-slash me-2';
+      } else {
+        sentryStatus.className = 'badge rounded-pill bg-success d-flex align-items-center';
+        sentryStatus.querySelector('i').className = 'bi bi-shield-lock-fill me-2';
+      }
+    }
+    // Call after updating status bar
+    async function updateStatusBar() {
+      // Email notification status
+      const notifRes = await fetch('/api/notifications/enabled');
+      const notifData = await notifRes.json();
+      const notifStatus = document.getElementById('notif-status');
+      const notifText = notifStatus.querySelector('span');
+      if (notifData.enabled) {
+        notifText.textContent = 'Email Notification: ON';
+      } else {
+        notifText.textContent = 'Email Notification: OFF';
+      }
+      // Sentry mode status
+      const sentryRes = await fetch('/api/sentry/status');
+      const sentryData = await sentryRes.json();
+      const sentryStatus = document.getElementById('sentry-status');
+      const sentryText = sentryStatus.querySelector('span');
+      if (sentryData.active) {
+        sentryText.textContent = 'Sentry Mode: ACTIVE';
+      } else {
+        sentryText.textContent = 'Sentry Mode: INACTIVE';
+      }
+      updateStatusBarStyles();
+    }
+    // Call on load and when toggles change
+    updateStatusBar();
+    document.getElementById('notif-toggle').addEventListener('change', updateStatusBar);
+
+    // Notification Settings Modal logic
+    const notifSettingsModal = document.getElementById('notifSettingsModal');
+    notifSettingsModal.addEventListener('show.bs.modal', async function () {
+      // Load current config
+      const res = await fetch('/api/email/config');
+      if (!res.ok) return;
+      const data = await res.json();
+      document.getElementById('notif-sender').value = data.sender || '';
+      document.getElementById('notif-receiver').value = data.receiver || '';
+      document.getElementById('notif-password').value = '';
+      document.getElementById('notif-apikey').value = '';
+      document.getElementById('notif-settings-success').classList.add('d-none');
+      document.getElementById('notif-settings-error').classList.add('d-none');
+    });
+    document.getElementById('notif-settings-form').addEventListener('submit', async function(e) {
+      e.preventDefault();
+      const sender = document.getElementById('notif-sender').value;
+      const receiver = document.getElementById('notif-receiver').value;
+      const password = document.getElementById('notif-password').value;
+      const api_key = document.getElementById('notif-apikey').value;
+      const res = await fetch('/api/email/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sender, receiver, password, api_key })
+      });
+      if (res.ok) {
+        document.getElementById('notif-settings-success').classList.remove('d-none');
+        document.getElementById('notif-settings-error').classList.add('d-none');
+        setTimeout(() => {
+          document.getElementById('notif-settings-success').classList.add('d-none');
+        }, 2000);
+      } else {
+        document.getElementById('notif-settings-success').classList.add('d-none');
+        document.getElementById('notif-settings-error').classList.remove('d-none');
+      }
+    });
   </script>
 </body>
 </html>

@@ -14,6 +14,7 @@ try:
 except ImportError:
     psutil = None
 from pantilthat import pan, tilt  # Add this import
+from email_notify import is_notification_enabled, set_notification_enabled, get_email_config, set_email_config
 
 # --- Configuration ---
 DB_PATH = os.path.join(os.path.dirname(__file__), 'face_logs.db')
@@ -322,6 +323,45 @@ def video_feed():
 @login_required
 def liveview():
     return render_template('liveview.html')
+
+@app.route('/api/notifications/enabled', methods=['GET'])
+@login_required
+def get_notifications_enabled():
+    return jsonify({'enabled': is_notification_enabled()})
+
+@app.route('/api/notifications/enabled', methods=['POST'])
+@login_required
+def set_notifications_enabled():
+    data = request.get_json()
+    enabled = bool(data.get('enabled', False))
+    set_notification_enabled(enabled)
+    return jsonify({'enabled': enabled})
+
+@app.route('/api/sentry/status', methods=['GET'])
+@login_required
+def get_sentry_status():
+    # Example: return sentry mode status from tracking_state
+    return jsonify({'active': tracking_state.get('sentry_mode', False)})
+
+@app.route('/api/email/config', methods=['GET'])
+@login_required
+def get_email_config_api():
+    config = get_email_config()
+    # Do not send password/api_key in response for security
+    config.pop('password', None)
+    config.pop('api_key', None)
+    return jsonify(config)
+
+@app.route('/api/email/config', methods=['POST'])
+@login_required
+def set_email_config_api():
+    data = request.get_json()
+    sender = data.get('sender', '')
+    receiver = data.get('receiver', '')
+    password = data.get('password', '')
+    api_key = data.get('api_key', '')
+    set_email_config(sender, receiver, password, api_key)
+    return jsonify({'success': True})
 
 if __name__ == '__main__':
     app.run(host=FLASK_HOST, port=FLASK_PORT, debug=True)
