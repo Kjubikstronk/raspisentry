@@ -8,6 +8,7 @@
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="{{ url_for('static', filename='css/styles.css') }}" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css?family=Orbitron:700&display=swap" rel="stylesheet">
   <style>
     .clickable-image {
       cursor: pointer;
@@ -119,6 +120,31 @@
         transform: translateY(0);
       }
     }
+
+    .logo-text {
+      position: absolute;
+      left: 50%;
+      top: 105%;
+      transform: translate(-50%, 0);
+      width: max-content;
+      text-align: center;
+      color: #b80000;
+      font-weight: bold;
+      font-size: 1.5rem;
+      opacity: 0;
+      pointer-events: none;
+      font-family: 'Orbitron', Arial, sans-serif;
+      text-shadow: 0 2px 8px #fff, 0 4px 24px #b8000033;
+      background: #fff;
+      padding: 2px 18px;
+      border-radius: 16px;
+      box-shadow: 0 2px 8px #eee;
+      z-index: 10;
+      transition: opacity 0.4s cubic-bezier(.4,2,.6,1);
+    }
+    .logo-container:hover .logo-text {
+      opacity: 1;
+    }
   </style>
 </head>
 <body>
@@ -127,9 +153,10 @@
       <div class="logo-container">
         <img src="{{ url_for('static', filename='img/logo.png') }}" alt="Logo" class="logo" style="width:120px;">
         <div class="holo-effect"></div>
+        <div class="logo-text">RaspiSentry</div>
       </div>
     </div>
-    <div id="system-status" class="row g-2 mb-4 justify-content-center">
+    <div id="system-status" class="row g-2 mb-4 justify-content-center" style="margin-top: 60px;">
       <div class="col-auto">
         <div class="card p-2 text-center small" style="min-width:90px;">
           <div class="fw-bold">CPU Temp</div>

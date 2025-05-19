@@ -134,24 +134,44 @@ def load_user(user_id):
 # --- Data Access ---
 def get_detections(limit=50):
     try:
-        response = raspi_session.get(f'http://{RASPI_HOST}:{RASPI_PORT}/detections')
-        if response.status_code == 200:
-            return response.json()
-        logger.error(f"Failed to fetch detections: {response.status_code}")
-        return []
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute('''
+            SELECT id, timestamp, confidence, face_area, location, ip, device_id
+            FROM detections
+            ORDER BY timestamp DESC
+            LIMIT ?
+        ''', (limit,))
+        detections = []
+        for row in cur.fetchall():
+            detections.append({
+                'id': row[0],
+                'timestamp': row[1],
+                'confidence': row[2],
+                'face_area': row[3],
+                'location': row[4],
+                'ip': row[5],
+                'device_id': row[6]
+            })
+        conn.close()
+        return detections
     except Exception as e:
-        logger.error(f"Error fetching detections: {e}")
+        logger.error(f"Error fetching detections from local database: {e}")
         return []
 
 def get_image_blob(det_id):
     try:
-        response = raspi_session.get(f'http://{RASPI_HOST}:{RASPI_PORT}/detection_image/{det_id}')
-        if response.status_code == 200:
-            return response.content
-        logger.error(f"Failed to fetch image: {response.status_code}")
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute('SELECT face_image FROM detections WHERE id = ?', (det_id,))
+        result = cur.fetchone()
+        conn.close()
+        if result and result[0]:
+            return result[0]
+        logger.error(f"No image found for detection ID: {det_id}")
         return None
     except Exception as e:
-        logger.error(f"Error fetching image: {e}")
+        logger.error(f"Error fetching image from local database: {e}")
         return None
 
 def get_cpu_temp():
