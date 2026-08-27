@@ -2,6 +2,7 @@ from flask import Flask, render_template, send_file, abort, url_for, request, re
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 import sqlite3
 import io
+import secrets
 import os
 import cv2
 import numpy as np
@@ -18,11 +19,18 @@ from email_notify import is_notification_enabled, set_notification_enabled, get_
 
 # --- Configuration ---
 DB_PATH = os.path.join(os.path.dirname(__file__), 'face_logs.db')
-SECRET_KEY = os.getenv('SECRET_KEY', 'your-secret-key-here')  # Change this to a secure secret key in production
+SECRET_KEY = os.getenv('SECRET_KEY') or secrets.token_hex(32)
+
+# Admin login. Set ADMIN_PASSWORD to keep a session across restarts; otherwise a
+# password is generated at boot and printed once.
+ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'admin')
+ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD') or secrets.token_urlsafe(12)
+if not os.getenv('ADMIN_PASSWORD'):
+    print(f"[RaspiSentry] Generated admin password: {ADMIN_PASSWORD}")
 
 # Raspberry Pi Configuration
 # Set these environment variables to match your Raspberry Pi's settings
-RASPI_HOST = '192.168.244.46'  # Raspberry Pi's IP address
+RASPI_HOST = os.getenv('RASPI_HOST', '127.0.0.1')
 RASPI_PORT = 5001  # Must match the port your Raspberry Pi server is running on
 
 # Flask Server Configuration
@@ -219,8 +227,8 @@ def login():
         username = request.form.get('username')
         password = request.form.get('password')
         
-        # Simple hardcoded admin/admin credentials
-        if username == 'admin' and password == 'admin':
+        if username == ADMIN_USERNAME and secrets.compare_digest(
+                (password or '').encode('utf-8'), ADMIN_PASSWORD.encode('utf-8')):
             user = User(username)
             login_user(user)
             return redirect(url_for('dashboard'))
@@ -364,4 +372,4 @@ def set_email_config_api():
     return jsonify({'success': True})
 
 if __name__ == '__main__':
-    app.run(host=FLASK_HOST, port=FLASK_PORT, debug=True)
+    app.run(host=FLASK_HOST, port=FLASK_PORT, debug=os.getenv('FLASK_DEBUG') == '1')

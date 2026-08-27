@@ -1,82 +1,109 @@
 # RaspiSentry
 
-A Raspberry Pi-based face detection and tracking system with pan-tilt camera control.
+A Raspberry Pi turns its camera to follow your face, and emails you a photo when it
+sees one. Built for a Pi 4 with a Pimoroni Pan-Tilt HAT.
+
+Two processes, and it matters which is which:
+
+- **`sentry_core.py` runs on the Pi.** It owns the camera and the servos: detects
+  faces with OpenCV's SSD model, steers the HAT to keep the face centred, sweeps the
+  area when it loses one, and serves the video stream and a command API on port 5001.
+- **`app.py` is the dashboard**, a Flask app on port 5000. It talks to the Pi over
+  that API, shows the live view, and browses past detections. It can run on the Pi or
+  on another machine on the same network.
 
 ## Features
 
-- Real-time face detection using OpenCV
-- Pan-tilt camera control with automatic tracking
-- Sentry mode for automatic area scanning
-- Email notifications for detected faces
-- Web interface for viewing detections
-- System status monitoring
-- Database logging of detections
+- Face detection and continuous pan-tilt tracking
+- Sentry mode: sweeps the area when no face is in view
+- Live MJPEG stream and manual camera control from the browser
+- Email alert with the captured frame attached, rate-limited to one a minute
+- Detections logged to SQLite with confidence, timestamp and image
 
-## Requirements
+## Hardware
 
-- Raspberry Pi (tested on Raspberry Pi 4)
+- Raspberry Pi (developed on a Pi 4)
 - Raspberry Pi Camera Module
 - Pimoroni Pan-Tilt HAT
 - Python 3.7+
 
-## Installation
+## Setup
 
-1. Clone the repository:
-```bash
-git clone https://github.com/Kjubikstronk/raspisentry.git
-cd raspisentry
-```
+Install dependencies on the Pi:
 
-2. Install dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-3. Download the face detection model files:
-   - `res10_300x300_ssd_iter_140000.caffemodel`
-   - `deploy.prototxt`
-   Place these files in the project root directory.
+The face detector needs two model files in the project root, which are not checked in:
 
-4. Configure email settings in `workingVer.py`:
-```python
-self.sender_email    = "your-email@gmail.com"
-self.sender_password = "your-app-password"
-self.receiver_email  = "recipient-email@example.com"
-```
+- `res10_300x300_ssd_iter_140000.caffemodel`
+- `deploy.prototxt`
 
-## Usage
+Both ship with OpenCV's face detector and are widely mirrored.
 
-1. Run the application:
+## Running it
+
+On the Pi:
+
 ```bash
-python workingVer.py
+python sentry_core.py
 ```
 
-2. Access the web interface:
-   - Open a web browser and navigate to `http://[raspberry-pi-ip]:5000`
-   - Default login credentials:
-     - Username: admin
-     - Password: admin
+Then the dashboard, pointed at the Pi:
 
-3. Control the camera:
-   - Use the web interface for manual control
-   - Enable sentry mode for automatic scanning
-   - View detected faces and system status
+```bash
+RASPI_HOST=192.168.1.42 python app.py
+```
 
-## Project Structure
+Open `http://<host>:5000`. The username is `admin`. If you have not set a password,
+one is generated at startup and printed to the console:
 
-- `workingVer.py` - Main application file
-- `templates/` - HTML templates for web interface
-- `static/` - Static files (CSS, JS, images)
-- `face_logs.db` - SQLite database for face detections
-- `requirements.txt` - Python dependencies
+```
+[RaspiSentry] Generated admin password: qN7pKx2vLm4T
+```
 
-## Security Notes
+That password changes every restart. To pin it, set `ADMIN_PASSWORD`.
 
-- Change the default admin password after first login
-- Use a secure email password (app password for Gmail)
-- Consider using HTTPS in production
-- Keep your Raspberry Pi updated with security patches
+Email alerts are configured in the dashboard, not in a file. What you enter is
+written to a local `.env`, which is gitignored.
+
+## Configuration
+
+All optional, all environment variables:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `RASPI_HOST` | `127.0.0.1` | Address of the Pi running `sentry_core.py` |
+| `ADMIN_USERNAME` | `admin` | Dashboard login |
+| `ADMIN_PASSWORD` | generated at boot | Dashboard password |
+| `SECRET_KEY` | generated at boot | Flask session key |
+| `FLASK_HOST` | `0.0.0.0` | Dashboard bind address |
+| `FLASK_PORT` | `5000` | Dashboard port |
+| `FLASK_DEBUG` | off | Set to `1` for the Werkzeug debugger |
+
+Leaving `SECRET_KEY` and `ADMIN_PASSWORD` unset is safe; it just means everyone gets
+logged out when the dashboard restarts.
+
+## Security
+
+This is a camera on your network with a web interface, so a few things are worth
+saying plainly:
+
+- **Do not set `FLASK_DEBUG=1` on a reachable interface.** The Werkzeug debugger
+  executes arbitrary code by design.
+- There is no HTTPS. Keep it on your LAN, or put it behind a reverse proxy.
+- The command server in `sentry_core.py` (port 5001) is unauthenticated. Anything on
+  your network that can reach it can move the camera and read the stream.
+
+## Files
+
+- `sentry_core.py` — camera, tracking, sweep and command server; runs on the Pi
+- `app.py` — Flask dashboard and its API
+- `email_notify.py` — alert delivery and credential storage
+- `templates/`, `static/` — dashboard front end
+- `face_logs.db` — SQLite detection log, created on first run
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details. 
+MIT — see [LICENSE](LICENSE).
