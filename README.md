@@ -1,5 +1,7 @@
 # RaspiSentry
 
+<img src="static/img/logo.png" alt="" width="160">
+
 A Raspberry Pi turns its camera to follow your face, and emails you a photo when it
 sees one. Built for a Pi 4 with a Pimoroni Pan-Tilt HAT.
 
